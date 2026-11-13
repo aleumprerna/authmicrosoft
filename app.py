@@ -8,9 +8,10 @@ from functools import wraps
 from pathlib import Path
 import msal
 import requests
+import mail_tracking
 from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
-from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, session, url_for
 
 load_dotenv()
 
@@ -63,6 +64,7 @@ def init_database():
             )
             """
         )
+        mail_tracking.init_tables(connection)
 
 
 def list_saved_accounts():
@@ -97,7 +99,7 @@ def save_account(account, claims, cache):
             ),
         )
 
-def get_access_token_for_account(account_id):
+def get_access_token_for_account(account_id, scopes=None):
     with database() as connection:
         saved = connection.execute(
             "SELECT * FROM microsoft_accounts WHERE id = ?", (account_id,)
@@ -121,7 +123,7 @@ def get_access_token_for_account(account_id):
     if not matching_accounts:
         return None, "This account needs to be added again."
 
-    result = msal_app.acquire_token_silent(SCOPES, account=matching_accounts[0])
+    result = msal_app.acquire_token_silent(scopes or SCOPES, account=matching_accounts[0])
     if cache.has_state_changed:
         encrypted_cache = token_cipher().encrypt(cache.serialize().encode())
         with database() as connection:
@@ -168,14 +170,15 @@ def configured(view):
 
 @app.get("/")
 def index():
-    return render_template("index.html", accounts=list_saved_accounts())
+    return render_template("index.html", accounts=list_saved_accounts(),
+                           tracking_public_ready=bool(mail_tracking.public_base_url()))
 
 
 @app.get("/login")
 @configured
 def login():
     flow = build_msal_app().initiate_auth_code_flow(
-        SCOPES,
+        SCOPES + ["Mail.Read"] if request.args.get("tracking") == "1" else SCOPES,
         redirect_uri=REDIRECT_URI,
         prompt="select_account",
     )
@@ -249,6 +252,7 @@ def send_mail():
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    tracking_health = mail_tracking.endpoint_health(force=True)
     for recipient in recipients:
         payload = {
             "message": {
@@ -258,17 +262,27 @@ def send_mail():
             },
             "saveToSentItems": True,
         }
+        tracking_id = None
+        try:
+            tracking_id, payload["message"] = mail_tracking.prepare_message(
+                database, account_id, recipient, subject, body, tracking_health
+            )
+        except (sqlite3.Error, mail_tracking.TrackingError):
+            app.logger.exception("Tracking could not be prepared; continuing Microsoft sending.")
         try:
             response = requests.post(
                 GRAPH_SEND_MAIL, headers=headers, json=payload, timeout=30
             )
         except requests.RequestException:
+            update_tracking(tracking_id, "unknown", "Microsoft acceptance is unknown after a connection error.")
             failed.append(recipient)
             continue
 
         if response.status_code == 202:
+            update_tracking(tracking_id, "accepted")
             sent += 1
         elif response.status_code == 401:
+            update_tracking(tracking_id, "failed", "Microsoft session expired.")
             flash(
                 f"Your Microsoft session expired after sending {sent} email(s). "
                 "Add this Microsoft account again.",
@@ -276,6 +290,7 @@ def send_mail():
             )
             return redirect(url_for("index"))
         else:
+            update_tracking(tracking_id, "failed", f"Microsoft returned HTTP {response.status_code}.")
             failed.append(recipient)
 
     if sent:
@@ -285,7 +300,89 @@ def send_mail():
         suffix = "…" if len(failed) > 5 else ""
         flash(f"Failed to send to {len(failed)} recipient(s): {preview}{suffix}", "error")
 
-    return redirect(url_for("index"))
+    return redirect(url_for("index", _anchor="email-tracking") if sent else url_for("index"))
+
+
+def update_tracking(email_id, status, error=None):
+    if email_id:
+        try:
+            mail_tracking.finish_message(database, email_id, status, error)
+        except sqlite3.Error:
+            app.logger.exception("Could not save tracking status for a Microsoft email.")
+
+
+@app.get("/api/tracking")
+def email_tracking():
+    response = jsonify(mail_tracking.tracking_data(database))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/tracking/health")
+def email_tracking_health():
+    response = jsonify(mail_tracking.tracking_health(database))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/t/health")
+def public_tracking_health():
+    response = jsonify(service="microsoft-email-tracking", status="ok")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/tracking/<email_id>/replies")
+def view_email_replies(email_id):
+    with database() as connection:
+        tracked = connection.execute("SELECT account_id FROM microsoft_email_tracking WHERE email_id = ?", (email_id,)).fetchone()
+    if not tracked:
+        response = jsonify(error="Tracked email not found.")
+        response.status_code = 404
+    else:
+        token, _ = get_access_token_for_account(tracked["account_id"], scopes=["Mail.Read"])
+        if not token:
+            response = jsonify(error="Enable reply tracking for this sender, then try View reply again.")
+            response.status_code = 403
+        else:
+            try:
+                response = jsonify(mail_tracking.load_replies(database, email_id, token))
+            except mail_tracking.TrackingError as error:
+                response = jsonify(error=str(error))
+                response.status_code = 502
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/tracking/replies/<int:account_id>")
+def check_replies(account_id):
+    token, error = get_access_token_for_account(account_id, scopes=["Mail.Read"])
+    if not token:
+        return jsonify(error="Enable reply tracking for this Microsoft account, grant Mail.Read, then check again."), 403
+    try:
+        return jsonify(mail_tracking.sync_replies(database, account_id, token))
+    except mail_tracking.TrackingError as error:
+        return jsonify(error=str(error)), 502
+
+
+@app.get("/t/o/<token>.gif")
+def track_open(token):
+    if not mail_tracking.record_open(database, token, count=request.method == "GET"):
+        abort(404)
+    pixel = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+    response = Response(pixel, mimetype="image/gif")
+    response.headers.update({"Cache-Control": "no-store, no-cache, max-age=0", "Pragma": "no-cache", "Expires": "0"})
+    return response
+
+
+@app.get("/t/c/<token>")
+def track_click(token):
+    destination = mail_tracking.record_click(database, token, count=request.method == "GET")
+    if not destination:
+        abort(404)
+    response = redirect(destination)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/logout")

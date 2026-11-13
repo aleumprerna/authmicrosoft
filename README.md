@@ -49,6 +49,8 @@ Add `http://localhost:5000/auth/callback` as a **Web** redirect URI under **Auth
 
 ## Notes
 
+Optional: [open, click and reply tracking for Microsoft-sent emails](TRACKING_SETUP.md). The existing Microsoft sender and email form stay in use.
+
 - `MICROSOFT_TENANT_ID=common` permits both organizational and personal Microsoft accounts when the app registration supports them. Use your Directory (tenant) ID to restrict sign-in to one organization.
 - Never commit `.env` or the client secret.
 - This is a small local example. For production, use HTTPS, server-side session storage, CSRF protection on the send form, a production WSGI server, and a certificate or managed secret store instead of a plain client secret.

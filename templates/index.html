@@ -1,15 +1,25 @@
 {% extends "base.html" %}
 {% block content %}
-<header>
-  <h1>Send an email</h1>
+<header class="page-header">
   <div>
-    <a class="button" href="{{ url_for('login') }}">Add Microsoft account</a>
-    <a class="button secondary" href="{{ url_for('logout') }}">Sign out Microsoft</a>
+    <p class="eyebrow">MICROSOFT MAIL</p>
+    <h1>Email workspace</h1>
+    <p class="muted">Send from your Microsoft account and follow every email in one place.</p>
   </div>
+  <nav class="header-actions" aria-label="Microsoft accounts">
+    <a class="button" href="{{ url_for('login') }}">Add Microsoft account</a>
+    <a class="button secondary" href="{{ url_for('logout') }}">Sign out</a>
+  </nav>
 </header>
 
+<section class="panel compose-panel" aria-labelledby="compose-heading">
+  <div class="section-heading">
+    <div><h2 id="compose-heading">Send an email</h2><p class="muted">Your selected Microsoft account remains the sender.</p></div>
+    <a class="text-link" href="#email-tracking">View email tracking &darr;</a>
+  </div>
 {% if accounts %}
-  <form method="post" action="{{ url_for('send_mail') }}">
+  <form class="compose-form" method="post" action="{{ url_for('send_mail') }}">
+    <div class="field field-full">
     <label for="sender_account">Send from Microsoft account</label>
     <select id="sender_account" name="sender_account" required>
       <option value="">Choose sender account</option>
@@ -17,16 +27,84 @@
         <option value="{{ account['id'] }}">{{ account['display_name'] }} — {{ account['email'] }}</option>
       {% endfor %}
     </select>
+    </div>
+    <div class="field recipients-field">
     <label for="recipients">Recipient emails</label>
     <textarea id="recipients" name="recipients" required placeholder="person1@example.com&#10;person2@example.com"></textarea>
     <small>Enter up to 50 addresses, one per line or separated by commas.</small>
+    </div>
+    <div class="message-fields">
+    <div class="field">
     <label for="subject">Subject</label>
     <input id="subject" name="subject" required maxlength="200">
+    </div>
+    <div class="field">
     <label for="body">Message</label>
     <textarea id="body" name="body" required></textarea>
+    </div>
+    </div>
+    <div class="form-actions field-full">
     <button type="submit">Send email</button>
+    <span class="muted">Each recipient receives a separate email.</span>
+    </div>
   </form>
 {% else %}
   <p>No sender account is saved yet. Select <strong>Add Microsoft account</strong> to connect one.</p>
 {% endif %}
+</section>
+
+<section id="email-tracking" class="panel tracking-panel" aria-labelledby="tracking-heading">
+  <div class="section-heading">
+    <div><h2 id="tracking-heading">Email tracking</h2><p class="muted">One row per sent email. See activity and read the replies to that exact email.</p></div>
+    <span class="live-label"><span aria-hidden="true"></span>Updates every 5 seconds</span>
+  </div>
+  <div class="stats-grid" aria-label="Email totals">
+    <div class="stat-card"><span>Emails sent</span><strong id="stat-sent">0</strong><small>Accepted by Microsoft</small></div>
+    <div class="stat-card"><span>Emails opened</span><strong id="stat-opened">0</strong><small>With an open signal</small></div>
+    <div class="stat-card"><span>Links clicked</span><strong id="stat-clicked">0</strong><small>Emails with link activity</small></div>
+    <div class="stat-card"><span>Replies received</span><strong id="stat-replied">0</strong><small>Emails with a matched reply</small></div>
+  </div>
+  <p id="tracking-health" class="notice" role="status">Checking the public tracking connection...</p>
+  {% if not tracking_public_ready %}
+    <p class="notice notice-warning">Open/click tracking is not enabled for new emails. Configure your public tracking URL using TRACKING_SETUP.md.</p>
+  {% endif %}
+  {% if accounts %}
+    <div class="tracking-toolbar">
+      <div class="mailbox-picker">
+      <label for="reply-account">Sender mailbox</label>
+      <select id="reply-account">
+        {% for account in accounts %}
+          <option value="{{ account['id'] }}">{{ account['email'] }}</option>
+        {% endfor %}
+      </select>
+      </div>
+      <button type="button" id="check-replies" class="check-button">Check replies</button>
+      <span id="last-reply-check" class="muted toolbar-note">Check your mailbox for new replies.</span>
+    </div>
+    <details class="reply-setup" id="reply-setup">
+      <summary>First time checking replies?</summary>
+      <p>Allow Microsoft mailbox access once, then use Check replies. Your sending account stays the same.</p>
+      <a class="button secondary" href="{{ url_for('login', tracking=1) }}">Enable reply tracking</a>
+    </details>
+  {% endif %}
+  <p id="reply-status" class="notice" role="status" hidden></p>
+  <div class="table-heading"><p id="tracking-summary" class="muted" aria-live="polite">Loading your emails...</p></div>
+  <p id="tracking-update" class="notice notice-warning" role="status" hidden></p>
+  <div class="table-container">
+    <table id="tracking-table" hidden>
+      <caption class="sr-only">Recipient, subject, send status, open activity, click activity and replies for each email.</caption>
+      <colgroup><col class="col-recipient"><col class="col-subject"><col class="col-status"><col class="col-open"><col class="col-click"><col class="col-reply"></colgroup>
+      <thead><tr><th scope="col">Recipient</th><th scope="col">Subject / sent time</th><th scope="col">Send status</th><th scope="col">Email open</th><th scope="col">Link click</th><th scope="col">Reply</th></tr></thead>
+      <tbody id="tracking-rows"></tbody>
+    </table>
+  </div>
+  <div id="tracking-empty" class="empty-state" hidden><strong>No emails to track yet</strong><p>Send an email using the form above. Its recipient, subject and activity will appear here.</p></div>
+  <p class="tracking-footnote">Sent means accepted by Microsoft, not confirmed delivery. Open and click signals can be affected by image blocking, privacy features and automated scanners.</p>
+</section>
+<dialog id="reply-dialog" aria-labelledby="reply-dialog-title" aria-describedby="reply-dialog-context">
+  <div class="dialog-header"><div><p class="eyebrow">EMAIL REPLIES</p><h2 id="reply-dialog-title">Replies</h2></div><button id="close-replies" class="button secondary" type="button" autofocus>Close</button></div>
+  <p id="reply-dialog-context" class="dialog-context"></p>
+  <div id="reply-dialog-content" aria-live="polite"></div>
+</dialog>
+<script src="{{ url_for('static', filename='tracking.js') }}" defer></script>
 {% endblock %}
